@@ -11,7 +11,7 @@ export interface Track {
   duration: number;
   thumbnail: string;
   /** Where this track record came from. */
-  source: "piped" | "invidious" | "library";
+  source: "official" | "piped" | "invidious" | "library";
 }
 
 export type BpmSource = "dsp" | "model";
@@ -60,7 +60,13 @@ export interface DeckState {
 
 export interface CrossfadeState {
   active: boolean;
-  /** 0..1 progress through the fade. */
+  /**
+   * "arming" — the incoming deck is buffering; the outgoing deck holds full
+   * volume so there is never a hole in the audio. "ramping" — both faders
+   * are riding the configured curve.
+   */
+  phase: "arming" | "ramping";
+  /** 0..1 progress through the ramp. */
   progress: number;
   from: DeckId;
   to: DeckId;

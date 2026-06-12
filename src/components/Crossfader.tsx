@@ -24,7 +24,9 @@ export function Crossfader({
     <div className={`xfader ${crossfade.active ? "xfader--live" : ""}`}>
       <div className="xfader__labels mono">
         <span className={activeDeck === "A" && !crossfade.active ? "is-hot" : ""}>A</span>
-        <span className="xfader__title">AUTO CROSSFADE — 6.0S LINEAR</span>
+        <span className="xfader__title">
+          AUTO CROSSFADE — {(crossfade.durationMs / 1000).toFixed(1)}S CURVE
+        </span>
         <span className={activeDeck === "B" && !crossfade.active ? "is-hot" : ""}>B</span>
       </div>
       <div className="xfader__rail">
@@ -53,9 +55,13 @@ export function Crossfader({
       </div>
       <div className="xfader__readout mono">
         {crossfade.active ? (
-          <span className="is-hot">
-            TRANSITION {Math.round(crossfade.progress * 100)}% — {crossfade.from} ▸ {crossfade.to}
-          </span>
+          crossfade.phase === "arming" ? (
+            <span className="is-hot">SYNCING INCOMING DECK {crossfade.to}…</span>
+          ) : (
+            <span className="is-hot">
+              TRANSITION {Math.round(crossfade.progress * 100)}% — {crossfade.from} ▸ {crossfade.to}
+            </span>
+          )
         ) : (
           <span>FADER LOCKED TO DECK {activeDeck}</span>
         )}

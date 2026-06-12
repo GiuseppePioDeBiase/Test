@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { SearchState, Track } from "../types";
 import { searchTracks } from "../lib/search";
 import { quickAnalyze } from "../lib/bpm";
+import { toggleSaved, useLibrary } from "../lib/settings";
 import { MagneticButton } from "./MagneticButton";
 import { ScrambleText } from "./ScrambleText";
 
@@ -52,6 +53,8 @@ export function SearchOverlay({
   });
   const inputRef = useRef<HTMLInputElement>(null);
   const reqSeq = useRef(0);
+  const { saved } = useLibrary();
+  const savedIds = new Set(saved.map((t) => t.id));
 
   useEffect(() => {
     if (open) {
@@ -194,6 +197,14 @@ export function SearchOverlay({
                                 onClick={() => onQueue(t)}
                               >
                                 {queuedIds.has(t.id) ? "QUEUED ✓" : "+ QUEUE"}
+                              </MagneticButton>
+                              <MagneticButton
+                                className={`result__btn ${savedIds.has(t.id) ? "result__btn--saved" : ""}`}
+                                strength={8}
+                                onClick={() => toggleSaved(t)}
+                                aria-label={savedIds.has(t.id) ? "Remove from library" : "Save to library"}
+                              >
+                                {savedIds.has(t.id) ? "★" : "☆"}
                               </MagneticButton>
                             </div>
                           </motion.li>

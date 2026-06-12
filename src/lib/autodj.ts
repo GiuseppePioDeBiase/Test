@@ -16,15 +16,32 @@ import {
   tierFor,
 } from "./bpm";
 import { searchTracks } from "./search";
+import { recordHistory, settingsStore, type FadeCurve } from "./settings";
 
-/** Auto-fade fires when this many seconds remain on the active track. */
-const FADE_TRIGGER_SECONDS = 15;
-/** Linear crossfade length. */
-const FADE_DURATION_MS = 6_000;
-/** The idle deck pre-buffers the next track this early. */
-const PRELOAD_SECONDS = 26;
+/** The idle deck pre-buffers the next track this many seconds before the fade. */
+const PRELOAD_LEAD_SECONDS = 11;
+/** Max time the engine waits for the incoming stream before ramping anyway. */
+const ARM_TIMEOUT_MS = 5_000;
 /** Engine clock. */
 const TICK_MS = 150;
+
+/**
+ * Volume automation curves. "smooth" (S-curve) is the Spotify-like default:
+ * gentle in, gentle out, with the energy handover concentrated mid-fade.
+ * "power" is the classic constant-energy DJ fade.
+ */
+function fadeGains(curve: FadeCurve, p: number): { out: number; in: number } {
+  switch (curve) {
+    case "linear":
+      return { out: 1 - p, in: p };
+    case "power":
+      return { out: Math.cos((p * Math.PI) / 2), in: Math.sin((p * Math.PI) / 2) };
+    case "smooth": {
+      const s = p * p * (3 - 2 * p);
+      return { out: 1 - s, in: s };
+    }
+  }
+}
 
 const MAX_LOG = 28;
 
@@ -69,7 +86,14 @@ export class AutoDJEngine {
       decks: { A: emptyDeck("A"), B: emptyDeck("B") },
       activeDeck: "A",
       queue: [],
-      crossfade: { active: false, progress: 0, from: "A", to: "B", durationMs: FADE_DURATION_MS },
+      crossfade: {
+        active: false,
+        phase: "arming",
+        progress: 0,
+        from: "A",
+        to: "B",
+        durationMs: settingsStore.get().fadeDurationMs,
+      },
       suggestionPhase: "idle",
       candidates: [],
       bestCandidate: null,
@@ -187,7 +211,7 @@ export class AutoDJEngine {
       this.notify();
       return;
     }
-    this.rememberPlayed(track.id);
+    this.rememberPlayed(track);
     void this.analyzeDeck(target, track);
     this.scoutCandidates(track);
   }
@@ -305,10 +329,11 @@ export class AutoDJEngine {
     const active = s.decks[s.activeDeck];
     if (s.transport === "playing" && active.track && active.duration > 0) {
       const remaining = active.duration - active.currentTime;
+      const triggerSec = settingsStore.get().fadeTriggerSec;
 
       const countdown =
-        remaining <= FADE_TRIGGER_SECONDS + 20 && !s.crossfade.active
-          ? Math.max(0, remaining - FADE_TRIGGER_SECONDS)
+        remaining <= triggerSec + 20 && !s.crossfade.active
+          ? Math.max(0, remaining - triggerSec)
           : null;
       if (countdown !== s.autoFadeCountdown) {
         s.autoFadeCountdown = countdown;
@@ -317,7 +342,7 @@ export class AutoDJEngine {
 
       // Pre-arm the idle deck so the incoming stream is already buffered.
       if (
-        remaining <= PRELOAD_SECONDS &&
+        remaining <= triggerSec + PRELOAD_LEAD_SECONDS &&
         !s.crossfade.active &&
         this.ensureNextAvailable() &&
         this.cuedOnIdle !== s.queue[0]?.id
@@ -331,8 +356,8 @@ export class AutoDJEngine {
         dirty = true;
       }
 
-      // The moment of truth: 15 seconds left → 6 second linear crossfade.
-      if (remaining <= FADE_TRIGGER_SECONDS && remaining > 0.5 && !s.crossfade.active) {
+      // The moment of truth: configured trigger reached → curved crossfade.
+      if (remaining <= triggerSec && remaining > 0.5 && !s.crossfade.active) {
         if (this.ensureNextAvailable()) {
           this.beginCrossfade("auto");
           return;
@@ -375,6 +400,8 @@ export class AutoDJEngine {
     if (!next) return;
     s.queue = s.queue.slice(1);
 
+    const { fadeDurationMs, fadeCurve } = settingsStore.get();
+
     const toDeck = s.decks[to];
     toDeck.track = next;
     toDeck.status = "loading";
@@ -384,12 +411,19 @@ export class AutoDJEngine {
     toDeck.duration = next.duration;
     toDeck.volume = 0;
 
-    s.crossfade = { active: true, progress: 0, from, to, durationMs: FADE_DURATION_MS };
+    s.crossfade = {
+      active: true,
+      phase: "arming",
+      progress: 0,
+      from,
+      to,
+      durationMs: fadeDurationMs,
+    };
     s.autoFadeCountdown = null;
     s.transport = "playing";
     this.log(
       reason === "auto"
-        ? `AUTO-FADE ENGAGED ▸ DECK ${from} → DECK ${to} (6.0s LINEAR)`
+        ? `AUTO-FADE ENGAGED ▸ ${from} → ${to} (${(fadeDurationMs / 1000).toFixed(1)}s ${fadeCurve.toUpperCase()})`
         : `CROSSFADE FORCED ▸ DECK ${from} → DECK ${to}`,
       "mix",
     );
@@ -398,7 +432,7 @@ export class AutoDJEngine {
     void this.players[to]
       .load(next.id, 0)
       .then(() => {
-        this.rememberPlayed(next.id);
+        this.rememberPlayed(next);
         void this.analyzeDeck(to, next);
       })
       .catch(() => {
@@ -411,20 +445,44 @@ export class AutoDJEngine {
         this.notify();
       });
 
-    this.fadeStartedAt = performance.now();
+    // Phase 1 — ARMING: hold the outgoing deck at full volume until the
+    // incoming stream is audibly rolling (or the safety timeout fires), so
+    // the handover never opens a hole. This is what makes it feel like
+    // Spotify's automix instead of fading into buffering silence.
+    const armStarted = performance.now();
+    let ramping = false;
+
     const run = (now: number) => {
       if (!this.state.crossfade.active || this.destroyed) return;
+
+      if (!ramping) {
+        const incomingLive = this.players[to].isPlaying();
+        const timedOut = now - armStarted >= ARM_TIMEOUT_MS;
+        if (incomingLive || timedOut) {
+          ramping = true;
+          this.state.crossfade.phase = "ramping";
+          this.fadeStartedAt = now;
+          this.lastFadeFrame = now;
+          this.notify();
+        } else {
+          this.fadeRaf = requestAnimationFrame(run);
+          return;
+        }
+      }
+
       if (this.state.transport === "paused") {
         // Freeze the fade while paused; resume continues where it left off.
         this.fadeStartedAt += now - this.lastFadeFrame;
       }
       this.lastFadeFrame = now;
-      const p = Math.min(1, (now - this.fadeStartedAt) / FADE_DURATION_MS);
-      const outV = Math.round((1 - p) * 100);
-      const inV = Math.round(p * 100);
+
+      const p = Math.min(1, (now - this.fadeStartedAt) / fadeDurationMs);
+      const g = fadeGains(fadeCurve, p);
+      const outV = Math.round(g.out * 100);
+      const inV = Math.round(g.in * 100);
       this.players[from].setVolume(outV);
       this.players[to].setVolume(inV);
-      this.state.decks[from].volume = (100 - inV) / 100;
+      this.state.decks[from].volume = outV / 100;
       this.state.decks[to].volume = inV / 100;
       this.state.crossfade.progress = p;
       this.notify();
@@ -434,7 +492,6 @@ export class AutoDJEngine {
         this.fadeRaf = requestAnimationFrame(run);
       }
     };
-    this.lastFadeFrame = performance.now();
     this.fadeRaf = requestAnimationFrame(run);
   }
 
@@ -448,7 +505,14 @@ export class AutoDJEngine {
     s.decks[to].volume = 1;
     this.players[to].setVolume(100);
     s.activeDeck = to;
-    s.crossfade = { active: false, progress: 0, from, to, durationMs: FADE_DURATION_MS };
+    s.crossfade = {
+      active: false,
+      phase: "arming",
+      progress: 0,
+      from,
+      to,
+      durationMs: settingsStore.get().fadeDurationMs,
+    };
     this.cuedOnIdle = null;
     this.log(`TRANSITION COMPLETE ▸ DECK ${to} IS LIVE`, "mix");
     this.notify();
@@ -459,7 +523,12 @@ export class AutoDJEngine {
   private cancelFade() {
     if (this.fadeRaf !== null) cancelAnimationFrame(this.fadeRaf);
     this.fadeRaf = null;
-    this.state.crossfade = { ...this.state.crossfade, active: false, progress: 0 };
+    this.state.crossfade = {
+      ...this.state.crossfade,
+      active: false,
+      phase: "arming",
+      progress: 0,
+    };
   }
 
   /* ----------------------------- intelligence ----------------------------- */
@@ -482,8 +551,12 @@ export class AutoDJEngine {
     if (id === this.state.activeDeck) this.scoutCandidates(track);
   }
 
-  private rememberPlayed(id: string) {
-    this.recentlyPlayed = [id, ...this.recentlyPlayed.filter((x) => x !== id)].slice(0, 24);
+  private rememberPlayed(track: Track) {
+    this.recentlyPlayed = [
+      track.id,
+      ...this.recentlyPlayed.filter((x) => x !== track.id),
+    ].slice(0, 24);
+    recordHistory(track);
   }
 
   /**

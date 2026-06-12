@@ -19,7 +19,7 @@ const BOOT_STATE: EngineState = {
   },
   activeDeck: "A",
   queue: [],
-  crossfade: { active: false, progress: 0, from: "A", to: "B", durationMs: 6000 },
+  crossfade: { active: false, phase: "arming", progress: 0, from: "A", to: "B", durationMs: 6000 },
   suggestionPhase: "idle",
   candidates: [],
   bestCandidate: null,

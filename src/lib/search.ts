@@ -1,28 +1,37 @@
 import type { Track } from "../types";
+import { settingsStore } from "./settings";
 
 /**
- * Streaming search — resolves real, playable YouTube tracks without any API
- * key and without ever downloading media. We race through a pool of public
- * Piped / Invidious gateways (both expose CORS-enabled JSON search over the
- * YouTube catalogue); whichever instance answers first wins. If the entire
- * pool is unreachable (offline demo, locked-down network) we fall back to a
- * curated, embeddable library so the experience never dead-ends.
+ * Streaming search — resolves real, playable YouTube tracks without ever
+ * downloading media. Resolution order:
+ *
+ *  1. Official YouTube Data API v3, when the user has supplied a (free) API
+ *     key in SETTINGS — full catalogue, every song findable.
+ *  2. The entire pool of public Piped / Invidious gateways raced in
+ *     parallel; the first non-empty answer wins, so dead instances cost
+ *     nothing but their timeout.
+ *  3. A curated, embeddable onboard library so the app never dead-ends.
  */
 
 const PIPED_INSTANCES = [
   "https://pipedapi.kavin.rocks",
   "https://pipedapi.adminforge.de",
+  "https://api.piped.private.coffee",
+  "https://pipedapi.reallyaweso.me",
+  "https://pipedapi.ducks.party",
   "https://api.piped.yt",
-  "https://pipedapi.darkness.services",
 ];
 
 const INVIDIOUS_INSTANCES = [
   "https://yewtu.be",
   "https://inv.nadeko.net",
   "https://invidious.nerdvpn.de",
+  "https://iv.melmac.space",
+  "https://invidious.f5.si",
+  "https://invidious.private.coffee",
 ];
 
-const REQUEST_TIMEOUT_MS = 5_000;
+const REQUEST_TIMEOUT_MS = 6_000;
 
 function fetchJSON(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
   const ctrl = new AbortController();
@@ -35,13 +44,81 @@ function fetchJSON(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown
     .finally(() => window.clearTimeout(timer));
 }
 
-function parseIsoOrSeconds(v: unknown): number {
-  if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, v);
-  return 0;
-}
-
 function thumbFor(id: string): string {
   return `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
+}
+
+/* ------------------------- official Data API v3 -------------------------- */
+
+interface ApiSearchItem {
+  id?: { videoId?: string };
+  snippet?: { title?: string; channelTitle?: string };
+}
+
+interface ApiVideoItem {
+  id?: string;
+  contentDetails?: { duration?: string };
+}
+
+/** ISO-8601 duration (PT3M21S) → seconds. */
+function parseIsoDuration(iso: string): number {
+  const m = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso);
+  if (!m) return 0;
+  return (Number(m[1]) || 0) * 3600 + (Number(m[2]) || 0) * 60 + (Number(m[3]) || 0);
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+async function searchOfficial(query: string, key: string, limit: number): Promise<Track[]> {
+  const searchUrl =
+    `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video` +
+    `&maxResults=${Math.min(25, limit + 6)}&q=${encodeURIComponent(query)}` +
+    `&videoEmbeddable=true&key=${encodeURIComponent(key)}`;
+  const data = (await fetchJSON(searchUrl)) as { items?: ApiSearchItem[] };
+  const items = (data.items ?? []).filter((it) => it.id?.videoId);
+  if (items.length === 0) return [];
+
+  const ids = items.map((it) => it.id!.videoId!).join(",");
+  const durations = new Map<string, number>();
+  try {
+    const det = (await fetchJSON(
+      `https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=${ids}` +
+        `&key=${encodeURIComponent(key)}`,
+    )) as { items?: ApiVideoItem[] };
+    for (const v of det.items ?? []) {
+      if (v.id) durations.set(v.id, parseIsoDuration(v.contentDetails?.duration ?? ""));
+    }
+  } catch {
+    // durations are nice-to-have; the player reports them anyway
+  }
+
+  return items.map((it) => ({
+    id: it.id!.videoId!,
+    title: decodeEntities(it.snippet?.title ?? "Untitled"),
+    artist: decodeEntities(it.snippet?.channelTitle ?? "Unknown artist"),
+    duration: durations.get(it.id!.videoId!) ?? 0,
+    thumbnail: thumbFor(it.id!.videoId!),
+    source: "official" as const,
+  }));
+}
+
+/** Cheap key validation for the SETTINGS tool. */
+export async function testApiKey(key: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    const tracks = await searchOfficial("music", key, 1);
+    return tracks.length > 0
+      ? { ok: true, message: "KEY VALID — FULL CATALOGUE UNLOCKED" }
+      : { ok: false, message: "KEY ACCEPTED BUT RETURNED NO RESULTS" };
+  } catch (e) {
+    return { ok: false, message: `KEY REJECTED (${(e as Error).message})` };
+  }
 }
 
 /* ------------------------------- Piped ---------------------------------- */
@@ -61,7 +138,7 @@ function mapPiped(items: PipedItem[]): Track[] {
     if (it.type && it.type !== "stream") continue;
     const m = /v=([\w-]{11})/.exec(it.url ?? "");
     if (!m) continue;
-    const duration = parseIsoOrSeconds(it.duration);
+    const duration = typeof it.duration === "number" ? Math.max(0, it.duration) : 0;
     if (duration > 0 && duration < 60) continue; // skip shorts/idents
     out.push({
       id: m[1],
@@ -76,16 +153,10 @@ function mapPiped(items: PipedItem[]): Track[] {
 }
 
 async function searchPiped(base: string, query: string): Promise<Track[]> {
-  const url = `${base}/search?q=${encodeURIComponent(query)}&filter=music_songs`;
-  const data = (await fetchJSON(url)) as { items?: PipedItem[] };
-  let tracks = mapPiped(data.items ?? []);
-  if (tracks.length === 0) {
-    const fallback = (await fetchJSON(
-      `${base}/search?q=${encodeURIComponent(query)}&filter=videos`,
-    )) as { items?: PipedItem[] };
-    tracks = mapPiped(fallback.items ?? []);
-  }
-  return tracks;
+  const data = (await fetchJSON(
+    `${base}/search?q=${encodeURIComponent(query)}&filter=videos`,
+  )) as { items?: PipedItem[] };
+  return mapPiped(data.items ?? []);
 }
 
 /* ----------------------------- Invidious -------------------------------- */
@@ -98,12 +169,14 @@ interface InvidiousItem {
 }
 
 async function searchInvidious(base: string, query: string): Promise<Track[]> {
-  const url = `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video`;
-  const data = (await fetchJSON(url)) as InvidiousItem[];
+  const data = (await fetchJSON(
+    `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video`,
+  )) as InvidiousItem[];
   const out: Track[] = [];
   for (const it of Array.isArray(data) ? data : []) {
     if (!it.videoId) continue;
-    const duration = parseIsoOrSeconds(it.lengthSeconds);
+    const duration =
+      typeof it.lengthSeconds === "number" ? Math.max(0, it.lengthSeconds) : 0;
     if (duration > 0 && duration < 60) continue;
     out.push({
       id: it.videoId,
@@ -119,11 +192,6 @@ async function searchInvidious(base: string, query: string): Promise<Track[]> {
 
 /* -------------------------- Curated fallback ----------------------------- */
 
-/**
- * Embeddable, well-known uploads spanning several genres / BPM ranges so the
- * Auto-DJ always has harmonic material to work with even fully offline from
- * the search gateways.
- */
 export const CURATED_LIBRARY: Track[] = [
   { id: "5qap5aO4i9A", title: "lofi hip hop radio — beats to relax/study to", artist: "Lofi Girl", duration: 0, thumbnail: thumbFor("5qap5aO4i9A"), source: "library" },
   { id: "y6120QOlsfU", title: "Sandstorm", artist: "Darude", duration: 225, thumbnail: thumbFor("y6120QOlsfU"), source: "library" },
@@ -162,12 +230,53 @@ export interface SearchOutcome {
   servedBy: string;
 }
 
+/** Resolves when the first attempt yields a non-empty track list. */
+function firstNonEmpty(
+  attempts: Array<{ name: string; run: () => Promise<Track[]> }>,
+): Promise<SearchOutcome | null> {
+  return new Promise((resolve) => {
+    let pending = attempts.length;
+    if (pending === 0) {
+      resolve(null);
+      return;
+    }
+    let done = false;
+    for (const a of attempts) {
+      a.run()
+        .then((tracks) => {
+          if (!done && tracks.length > 0) {
+            done = true;
+            resolve({ tracks, servedBy: a.name });
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          pending -= 1;
+          if (pending === 0 && !done) resolve(null);
+        });
+    }
+  });
+}
+
 /**
- * Races the gateway pool, returning the first non-empty result set.
- * Never rejects — the curated library is the terminal fallback.
+ * Never rejects — official API first, then the whole gateway pool in
+ * parallel, then the onboard library.
  */
 export async function searchTracks(query: string, limit = 12): Promise<SearchOutcome> {
-  const attempts: Array<{ name: string; run: () => Promise<Track[]> }> = [
+  const { apiKey } = settingsStore.get();
+
+  if (apiKey.trim()) {
+    try {
+      const tracks = await searchOfficial(query, apiKey.trim(), limit);
+      if (tracks.length > 0) {
+        return { tracks: dedupe(tracks).slice(0, limit), servedBy: "youtube data api" };
+      }
+    } catch {
+      // quota exhausted / key revoked — fall through to gateways
+    }
+  }
+
+  const attempts = [
     ...PIPED_INSTANCES.map((base) => ({
       name: new URL(base).host,
       run: () => searchPiped(base, query),
@@ -178,17 +287,8 @@ export async function searchTracks(query: string, limit = 12): Promise<SearchOut
     })),
   ];
 
-  // Try gateways two at a time so one slow instance can't stall the UX.
-  for (let i = 0; i < attempts.length; i += 2) {
-    const batch = attempts.slice(i, i + 2);
-    const results = await Promise.allSettled(batch.map((a) => a.run()));
-    for (let j = 0; j < results.length; j++) {
-      const r = results[j];
-      if (r.status === "fulfilled" && r.value.length > 0) {
-        return { tracks: dedupe(r.value).slice(0, limit), servedBy: batch[j].name };
-      }
-    }
-  }
+  const won = await firstNonEmpty(attempts);
+  if (won) return { tracks: dedupe(won.tracks).slice(0, limit), servedBy: won.servedBy };
 
   return { tracks: curatedSearch(query).slice(0, limit), servedBy: "onboard library" };
 }
@@ -200,4 +300,44 @@ function dedupe(tracks: Track[]): Track[] {
     seen.add(t.id);
     return true;
   });
+}
+
+/* ----------------------------- diagnostics ------------------------------- */
+
+export interface GatewayStatus {
+  host: string;
+  kind: "piped" | "invidious";
+  ok: boolean;
+  latencyMs: number | null;
+}
+
+/** Pings every gateway for the SETTINGS diagnostics panel. */
+export async function pingGateways(): Promise<GatewayStatus[]> {
+  const probes: Array<Promise<GatewayStatus>> = [
+    ...PIPED_INSTANCES.map((base) => probe(base, "piped", () => searchPiped(base, "music"))),
+    ...INVIDIOUS_INSTANCES.map((base) =>
+      probe(base, "invidious", () => searchInvidious(base, "music")),
+    ),
+  ];
+  return Promise.all(probes);
+}
+
+async function probe(
+  base: string,
+  kind: GatewayStatus["kind"],
+  run: () => Promise<Track[]>,
+): Promise<GatewayStatus> {
+  const host = new URL(base).host;
+  const started = performance.now();
+  try {
+    const tracks = await run();
+    return {
+      host,
+      kind,
+      ok: tracks.length > 0,
+      latencyMs: Math.round(performance.now() - started),
+    };
+  } catch {
+    return { host, kind, ok: false, latencyMs: null };
+  }
 }
