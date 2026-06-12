@@ -13,6 +13,7 @@ import { MagneticButton } from "./components/MagneticButton";
 import { LibraryView } from "./components/LibraryView";
 import { AnalyzerView } from "./components/AnalyzerView";
 import { SettingsView } from "./components/SettingsView";
+import { AutoMixPanel } from "./components/AutoMixPanel";
 import type { EngineState } from "./types";
 
 type ToolId = "decks" | "library" | "analyzer" | "settings";
@@ -40,10 +41,41 @@ const viewVariants = {
   },
 };
 
-function MixerView({ state }: { state: EngineState }) {
+function MixerView({
+  state,
+  onRequestSearch,
+}: {
+  state: EngineState;
+  onRequestSearch: () => void;
+}) {
   const engine = useEngine();
+  const pristine =
+    state.transport === "stopped" &&
+    !state.decks.A.track &&
+    !state.decks.B.track &&
+    state.queue.length === 0;
+
   return (
     <>
+      {pristine && (
+        <motion.ol
+          className="howto mono"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <li>
+            <b>01</b> SEARCH A SONG AND HIT PLAY
+          </li>
+          <li>
+            <b>02</b> THE AI SUGGESTS WHAT TO MIX NEXT — ONE CLICK ARMS IT ON THE FREE DECK
+          </li>
+          <li>
+            <b>03</b> AUTO FINDS THE PERFECT MOMENT AND BLENDS THE TRACKS FOR YOU
+          </li>
+        </motion.ol>
+      )}
+
       <main className="stage">
         <div className="stage__deck stage__deck--a">
           <Deck
@@ -51,10 +83,16 @@ function MixerView({ state }: { state: EngineState }) {
             isActive={state.activeDeck === "A"}
             crossfade={state.crossfade}
             autoFadeCountdown={state.activeDeck === "A" ? state.autoFadeCountdown : null}
+            onRequestSearch={onRequestSearch}
           />
         </div>
 
         <div className="stage__center">
+          <AutoMixPanel
+            state={state}
+            onToggleAuto={(on) => engine?.setAutoMix(on)}
+            onMixNow={() => engine?.skipNext()}
+          />
           <Crossfader crossfade={state.crossfade} activeDeck={state.activeDeck} />
           <TransportControls
             state={state}
@@ -63,7 +101,11 @@ function MixerView({ state }: { state: EngineState }) {
             onSkip={() => engine?.skipNext()}
             onStop={() => engine?.stop()}
           />
-          <SuggestionPanel state={state} onAccept={(c) => engine?.acceptSuggestion(c)} />
+          <SuggestionPanel
+            state={state}
+            onAccept={(c) => engine?.acceptSuggestion(c)}
+            onArm={(c) => engine?.armNext(c.track)}
+          />
         </div>
 
         <div className="stage__deck stage__deck--b">
@@ -72,6 +114,7 @@ function MixerView({ state }: { state: EngineState }) {
             isActive={state.activeDeck === "B"}
             crossfade={state.crossfade}
             autoFadeCountdown={state.activeDeck === "B" ? state.autoFadeCountdown : null}
+            onRequestSearch={onRequestSearch}
           />
         </div>
       </main>
@@ -179,7 +222,9 @@ function Console() {
             animate="enter"
             exit="exit"
           >
-            {tool === "decks" && <MixerView state={state} />}
+            {tool === "decks" && (
+              <MixerView state={state} onRequestSearch={() => setSearchOpen(true)} />
+            )}
             {tool === "library" && (
               <LibraryView
                 onPlay={playNow}

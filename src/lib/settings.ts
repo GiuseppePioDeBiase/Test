@@ -11,12 +11,17 @@ export type FadeCurve = "smooth" | "power" | "linear";
 export interface EngineSettings {
   /** YouTube Data API v3 key — unlocks full official catalogue search. */
   apiKey: string;
-  /** Crossfade length in milliseconds (3000–12000). */
+  /** Base crossfade length in milliseconds (3000–12000). */
   fadeDurationMs: number;
   /** Seconds before track end when the auto-fade engages (10–30). */
   fadeTriggerSec: number;
   /** Volume automation curve. */
   fadeCurve: FadeCurve;
+  /**
+   * Smart Blend: adapt each transition to the match quality — perfect
+   * matches get long seamless blends, tempo clashes get quick swaps.
+   */
+  smartFade: boolean;
 }
 
 export const DEFAULT_SETTINGS: EngineSettings = {
@@ -24,6 +29,7 @@ export const DEFAULT_SETTINGS: EngineSettings = {
   fadeDurationMs: 6000,
   fadeTriggerSec: 15,
   fadeCurve: "smooth",
+  smartFade: true,
 };
 
 class PersistedStore<T> {

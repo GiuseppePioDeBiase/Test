@@ -13,12 +13,18 @@ function CandidateRow({
   c,
   isBest,
   onAccept,
+  onArm,
   queued,
+  armed,
+  idleDeck,
 }: {
   c: MixCandidate;
   isBest: boolean;
   onAccept: (c: MixCandidate) => void;
+  onArm: (c: MixCandidate) => void;
   queued: boolean;
+  armed: boolean;
+  idleDeck: string;
 }) {
   return (
     <motion.li
@@ -40,10 +46,21 @@ function CandidateRow({
       </div>
       <span className={`cand__badge mono badge--${c.tier}`}>{TIER_LABEL[c.tier]}</span>
       <MagneticButton
+        className={`cand__arm mono ${armed ? "cand__arm--done" : ""}`}
+        strength={8}
+        disabled={armed}
+        onClick={() => onArm(c)}
+        title={`Load straight onto deck ${idleDeck}, ready for the transition`}
+        aria-label={`Arm ${c.track.title} on deck ${idleDeck}`}
+      >
+        {armed ? "⚡ ARMED" : `⇥ DECK ${idleDeck}`}
+      </MagneticButton>
+      <MagneticButton
         className="cand__add"
         strength={8}
         disabled={queued}
         onClick={() => onAccept(c)}
+        title="Add to the queue"
         aria-label={`Queue ${c.track.title}`}
       >
         {queued ? "✓" : "+"}
@@ -55,12 +72,16 @@ function CandidateRow({
 export function SuggestionPanel({
   state,
   onAccept,
+  onArm,
 }: {
   state: EngineState;
   onAccept: (c: MixCandidate) => void;
+  onArm: (c: MixCandidate) => void;
 }) {
   const { suggestionPhase, candidates, bestCandidate, queue } = state;
   const queuedIds = new Set(queue.map((t) => t.id));
+  const idleDeck = state.activeDeck === "A" ? "B" : "A";
+  const armedId = state.decks[idleDeck].track?.id ?? null;
 
   return (
     <section className="suggest">
@@ -108,7 +129,10 @@ export function SuggestionPanel({
                   c={c}
                   isBest={bestCandidate?.track.id === c.track.id}
                   onAccept={onAccept}
+                  onArm={onArm}
                   queued={queuedIds.has(c.track.id)}
+                  armed={armedId === c.track.id}
+                  idleDeck={idleDeck}
                 />
               ))}
             </AnimatePresence>

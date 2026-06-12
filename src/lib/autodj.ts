@@ -16,7 +16,12 @@ import {
   tierFor,
 } from "./bpm";
 import { searchTracks } from "./search";
-import { recordHistory, settingsStore, type FadeCurve } from "./settings";
+import {
+  recordHistory,
+  settingsStore,
+  type EngineSettings,
+  type FadeCurve,
+} from "./settings";
 
 /** The idle deck pre-buffers the next track this many seconds before the fade. */
 const PRELOAD_LEAD_SECONDS = 11;
@@ -41,6 +46,53 @@ function fadeGains(curve: FadeCurve, p: number): { out: number; in: number } {
       return { out: 1 - s, in: s };
     }
   }
+}
+
+export interface BlendPlan {
+  durationMs: number;
+  curve: FadeCurve;
+  label: string;
+}
+
+/**
+ * Smart Blend — what makes this better than a fixed-length crossfade:
+ * the transition adapts to how well the two tracks actually fit.
+ * Perfect tempo matches earn a long, constant-energy seamless blend;
+ * harmonic neighbours get the user's base fade; tempo clashes get a quick
+ * S-curve swap so the rhythmic mismatch is never audible for long.
+ */
+export function planBlend(
+  refBpm: number | null,
+  incomingBpm: number | null,
+  settings: EngineSettings,
+): BlendPlan {
+  const { fadeDurationMs, fadeCurve, smartFade } = settings;
+  if (!smartFade || refBpm === null || incomingBpm === null) {
+    return { durationMs: fadeDurationMs, curve: fadeCurve, label: "FIXED BLEND" };
+  }
+  const delta = bpmDistance(refBpm, incomingBpm);
+  if (delta <= 2.5) {
+    return {
+      durationMs: Math.min(12_000, Math.round(fadeDurationMs * 1.5)),
+      curve: "power",
+      label: "LONG SEAMLESS BLEND",
+    };
+  }
+  if (delta <= 7) {
+    return { durationMs: fadeDurationMs, curve: fadeCurve, label: "STANDARD BLEND" };
+  }
+  return {
+    durationMs: Math.max(3_000, Math.round(fadeDurationMs * 0.55)),
+    curve: "smooth",
+    label: "QUICK SWAP — TEMPO CLASH",
+  };
+}
+
+/** Longest fade Smart Blend may choose — the mix point must leave room for it. */
+function maxBlendMs(settings: EngineSettings): number {
+  return settings.smartFade
+    ? Math.min(12_000, Math.round(settings.fadeDurationMs * 1.5))
+    : settings.fadeDurationMs;
 }
 
 const MAX_LOG = 28;
@@ -97,6 +149,9 @@ export class AutoDJEngine {
       suggestionPhase: "idle",
       candidates: [],
       bestCandidate: null,
+      autoMixEnabled: true,
+      mixPoint: null,
+      mixCountdown: null,
       autoFadeCountdown: null,
       transport: "stopped",
       log: [],
@@ -120,6 +175,8 @@ export class AutoDJEngine {
       deck.status = "ended";
       this.state.transport = "stopped";
       this.state.autoFadeCountdown = null;
+      this.state.mixPoint = null;
+      this.state.mixCountdown = null;
       this.log(`DECK ${id} ▸ TRACK ENDED — NO NEXT MATERIAL`, "warn");
       this.notify();
     } else if (type === "error") {
@@ -212,6 +269,8 @@ export class AutoDJEngine {
       return;
     }
     this.rememberPlayed(track);
+    this.syncIdleDeck();
+    this.notify();
     void this.analyzeDeck(target, track);
     this.scoutCandidates(track);
   }
@@ -220,6 +279,7 @@ export class AutoDJEngine {
     if (this.state.queue.some((t) => t.id === track.id)) return;
     this.state.queue = [...this.state.queue, track];
     this.log(`QUEUE + "${track.title.toUpperCase().slice(0, 40)}"`, "info");
+    this.syncIdleDeck();
     this.notify();
   }
 
@@ -236,9 +296,82 @@ export class AutoDJEngine {
     this.notify();
   }
 
+  /** Master switch: when off, transitions only fire on explicit MIX NOW. */
+  setAutoMix(on: boolean) {
+    if (this.state.autoMixEnabled === on) return;
+    this.state.autoMixEnabled = on;
+    this.log(on ? "AUTO-MIX ▸ ENGAGED" : "AUTO-MIX ▸ MANUAL MODE", "info");
+    this.notify();
+  }
+
+  /**
+   * Puts a track first in line AND loads it onto the free deck right away —
+   * visible, cued and ready, so the transition starts instantly when the
+   * mix point (or MIX NOW) arrives.
+   */
+  armNext(track: Track) {
+    if (this.state.crossfade.active) return;
+    this.state.candidates = this.state.candidates.filter((c) => c.track.id !== track.id);
+    this.state.bestCandidate = this.state.candidates[0] ?? null;
+    if (this.state.transport === "stopped") {
+      void this.playNow(track);
+      return;
+    }
+    this.state.queue = [track, ...this.state.queue.filter((t) => t.id !== track.id)];
+    this.armOnIdleDeck(track, "manual");
+    this.notify();
+  }
+
+  /** Cues a track on the idle deck and surfaces it on the deck card. */
+  private armOnIdleDeck(track: Track, reason: "auto" | "manual" | "queue") {
+    const to = this.idleDeck();
+    const deck = this.state.decks[to];
+    deck.track = track;
+    deck.analysis = quickAnalyze(track);
+    deck.analysisPending = false;
+    deck.status = "ready";
+    deck.currentTime = 0;
+    deck.duration = track.duration;
+    deck.volume = 0;
+    this.cuedOnIdle = track.id;
+    void this.players[to].cue(track.id).catch(() => {
+      this.cuedOnIdle = null;
+    });
+    this.log(
+      reason === "auto"
+        ? `DECK ${to} ▸ PRE-ARMED "${track.title.toUpperCase().slice(0, 36)}"`
+        : `DECK ${to} ▸ ARMED "${track.title.toUpperCase().slice(0, 36)}" — READY FOR TRANSITION`,
+      "mix",
+    );
+  }
+
   removeFromQueue(trackId: string) {
     this.state.queue = this.state.queue.filter((t) => t.id !== trackId);
+    this.syncIdleDeck();
     this.notify();
+  }
+
+  /**
+   * Keeps the free deck mirroring queue[0]: the moment a track becomes next
+   * in line it appears on the deck, armed and buffering — and if the head of
+   * the queue changes or empties, the deck follows.
+   */
+  private syncIdleDeck() {
+    const s = this.state;
+    if (s.crossfade.active || s.transport === "stopped") return;
+    const idle = this.idleDeck();
+    const deck = s.decks[idle];
+    const next = s.queue[0] ?? null;
+    if (!next) {
+      if (deck.track && deck.status === "ready") {
+        s.decks[idle] = emptyDeck(idle);
+        s.decks[idle].volume = 0;
+        this.cuedOnIdle = null;
+      }
+      return;
+    }
+    if (deck.track?.id === next.id) return;
+    this.armOnIdleDeck(next, "queue");
   }
 
   pause() {
@@ -282,6 +415,8 @@ export class AutoDJEngine {
     this.state.activeDeck = "A";
     this.state.transport = "stopped";
     this.state.autoFadeCountdown = null;
+    this.state.mixPoint = null;
+    this.state.mixCountdown = null;
     this.state.candidates = [];
     this.state.bestCandidate = null;
     this.state.suggestionPhase = "idle";
@@ -329,43 +464,79 @@ export class AutoDJEngine {
     const active = s.decks[s.activeDeck];
     if (s.transport === "playing" && active.track && active.duration > 0) {
       const remaining = active.duration - active.currentTime;
-      const triggerSec = settingsStore.get().fadeTriggerSec;
 
+      // Where is the perfect moment to mix out of this track?
+      const mixPoint = this.computeMixPoint(active);
+      if (mixPoint !== s.mixPoint) {
+        s.mixPoint = mixPoint;
+        dirty = true;
+      }
       const countdown =
-        remaining <= triggerSec + 20 && !s.crossfade.active
-          ? Math.max(0, remaining - triggerSec)
+        mixPoint !== null && !s.crossfade.active
+          ? Math.round(Math.max(0, mixPoint - active.currentTime) * 10) / 10
           : null;
-      if (countdown !== s.autoFadeCountdown) {
-        s.autoFadeCountdown = countdown;
+      if (countdown !== s.mixCountdown) {
+        s.mixCountdown = countdown;
+        dirty = true;
+      }
+      const deckChip = countdown !== null && countdown <= 20 ? countdown : null;
+      if (deckChip !== s.autoFadeCountdown) {
+        s.autoFadeCountdown = deckChip;
         dirty = true;
       }
 
-      // Pre-arm the idle deck so the incoming stream is already buffered.
+      // Pre-arm the idle deck so the next track is visible and buffered.
       if (
-        remaining <= triggerSec + PRELOAD_LEAD_SECONDS &&
+        countdown !== null &&
+        countdown <= PRELOAD_LEAD_SECONDS &&
         !s.crossfade.active &&
         this.ensureNextAvailable() &&
         this.cuedOnIdle !== s.queue[0]?.id
       ) {
-        const next = s.queue[0];
-        this.cuedOnIdle = next.id;
-        void this.players[this.idleDeck()].cue(next.id).catch(() => {
-          this.cuedOnIdle = null;
-        });
-        this.log(`DECK ${this.idleDeck()} ▸ PRE-ARMED "${next.title.toUpperCase().slice(0, 36)}"`, "mix");
+        this.armOnIdleDeck(s.queue[0], "auto");
         dirty = true;
       }
 
-      // The moment of truth: configured trigger reached → curved crossfade.
-      if (remaining <= triggerSec && remaining > 0.5 && !s.crossfade.active) {
+      // The perfect moment arrived → curved crossfade (when AUTO is on).
+      const shouldFire =
+        (s.autoMixEnabled && countdown !== null && countdown <= 0) ||
+        // Failsafe even in manual mode: never run off the end into silence.
+        remaining <= Math.max(2, settingsStore.get().fadeDurationMs / 1000 * 0.4);
+      if (shouldFire && remaining > 0.5 && !s.crossfade.active) {
         if (this.ensureNextAvailable()) {
           this.beginCrossfade("auto");
           return;
         }
       }
+    } else if (s.transport === "stopped" && (s.mixPoint !== null || s.mixCountdown !== null)) {
+      s.mixPoint = null;
+      s.mixCountdown = null;
+      dirty = true;
     }
 
     if (dirty) this.notify();
+  }
+
+  /**
+   * The "perfect moment": the last phrase boundary (8 bars of 4/4 at the
+   * track's BPM) that still leaves room for the full crossfade plus a small
+   * outro guard. Falls back to a plain time offset when BPM is unknown.
+   */
+  private computeMixPoint(deck: DeckState): number | null {
+    if (deck.duration <= 0) return null;
+    const settings = settingsStore.get();
+    const fadeLead = Math.max(settings.fadeTriggerSec, maxBlendMs(settings) / 1000 + 4);
+    const lastUsable = deck.duration - fadeLead;
+    if (lastUsable <= 0) return Math.round(Math.max(0, deck.duration - 5) * 10) / 10;
+
+    const bpm = deck.analysis?.bpm;
+    if (bpm && bpm > 0) {
+      const phraseSec = (60 / bpm) * 32; // 8 bars of 4/4
+      const aligned = Math.floor(lastUsable / phraseSec) * phraseSec;
+      // Only honour the phrase grid when it doesn't chop the track in half.
+      if (aligned >= deck.duration * 0.55) return Math.round(aligned * 10) / 10;
+    }
+    return Math.round(lastUsable * 10) / 10;
   }
 
   /**
@@ -400,7 +571,18 @@ export class AutoDJEngine {
     if (!next) return;
     s.queue = s.queue.slice(1);
 
-    const { fadeDurationMs, fadeCurve } = settingsStore.get();
+    const settings = settingsStore.get();
+    const blend = planBlend(
+      s.decks[from].analysis?.bpm ?? null,
+      quickAnalyze(next).bpm,
+      settings,
+    );
+    const fadeDurationMs = blend.durationMs;
+    const fadeCurve = blend.curve;
+
+    // If the user (or the pre-arm pass) already cued this exact track on the
+    // idle deck, it can start instantly — no reload, no buffering gap.
+    const alreadyArmed = this.cuedOnIdle === next.id && s.decks[to].track?.id === next.id;
 
     const toDeck = s.decks[to];
     toDeck.track = next;
@@ -423,27 +605,34 @@ export class AutoDJEngine {
     s.transport = "playing";
     this.log(
       reason === "auto"
-        ? `AUTO-FADE ENGAGED ▸ ${from} → ${to} (${(fadeDurationMs / 1000).toFixed(1)}s ${fadeCurve.toUpperCase()})`
-        : `CROSSFADE FORCED ▸ DECK ${from} → DECK ${to}`,
+        ? `AUTO-FADE ▸ ${from} → ${to} — ${blend.label} (${(fadeDurationMs / 1000).toFixed(1)}s)`
+        : `CROSSFADE FORCED ▸ ${from} → ${to} — ${blend.label} (${(fadeDurationMs / 1000).toFixed(1)}s)`,
       "mix",
     );
     this.notify();
 
-    void this.players[to]
-      .load(next.id, 0)
-      .then(() => {
-        this.rememberPlayed(next);
-        void this.analyzeDeck(to, next);
-      })
-      .catch(() => {
-        this.log(`DECK ${to} ▸ STREAM FAILED — ABORTING FADE`, "warn");
-        this.cancelFade();
-        s.decks[to] = emptyDeck(to);
-        s.decks[to].volume = 0;
-        this.players[from].setVolume(100);
-        s.decks[from].volume = 1;
-        this.notify();
-      });
+    if (alreadyArmed) {
+      this.players[to].setVolume(0);
+      this.players[to].play();
+      this.rememberPlayed(next);
+      void this.analyzeDeck(to, next);
+    } else {
+      void this.players[to]
+        .load(next.id, 0)
+        .then(() => {
+          this.rememberPlayed(next);
+          void this.analyzeDeck(to, next);
+        })
+        .catch(() => {
+          this.log(`DECK ${to} ▸ STREAM FAILED — ABORTING FADE`, "warn");
+          this.cancelFade();
+          s.decks[to] = emptyDeck(to);
+          s.decks[to].volume = 0;
+          this.players[from].setVolume(100);
+          s.decks[from].volume = 1;
+          this.notify();
+        });
+    }
 
     // Phase 1 — ARMING: hold the outgoing deck at full volume until the
     // incoming stream is audibly rolling (or the safety timeout fires), so
@@ -515,6 +704,7 @@ export class AutoDJEngine {
     };
     this.cuedOnIdle = null;
     this.log(`TRANSITION COMPLETE ▸ DECK ${to} IS LIVE`, "mix");
+    this.syncIdleDeck();
     this.notify();
     const live = s.decks[to].track;
     if (live) this.scoutCandidates(live);

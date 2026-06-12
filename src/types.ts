@@ -83,6 +83,16 @@ export interface EngineState {
   suggestionPhase: SuggestionPhase;
   candidates: MixCandidate[];
   bestCandidate: MixCandidate | null;
+  /** Whether the engine fires transitions by itself at the mix point. */
+  autoMixEnabled: boolean;
+  /**
+   * The computed "perfect moment" (seconds into the active track) where the
+   * transition should start: phrase-aligned to the track's BPM and placed
+   * ahead of the outro. Null until duration/analysis are known.
+   */
+  mixPoint: number | null;
+  /** Seconds until the mix point (null when nothing is playing). */
+  mixCountdown: number | null;
   /** Seconds remaining on the active deck before the auto-fade fires (null = far away). */
   autoFadeCountdown: number | null;
   /** Master transport state. */

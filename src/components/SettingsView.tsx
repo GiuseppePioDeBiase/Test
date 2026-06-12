@@ -58,7 +58,28 @@ export function SettingsView() {
 
           <div className="setting">
             <div className="setting__row mono">
-              <span>CROSSFADE LENGTH</span>
+              <span>SMART BLEND</span>
+              <button
+                className={`switch ${settings.smartFade ? "switch--on" : ""}`}
+                onClick={() => updateSettings({ smartFade: !settings.smartFade })}
+                role="switch"
+                aria-checked={settings.smartFade}
+                aria-label="Smart Blend"
+              >
+                <span className="switch__knob" />
+                <span className="switch__label mono">{settings.smartFade ? "ON" : "OFF"}</span>
+              </button>
+            </div>
+            <p className="setting__hint mono">
+              ADAPTS EVERY TRANSITION TO THE MATCH: PERFECT MATCHES GET A LONG SEAMLESS
+              CONSTANT-ENERGY BLEND (UP TO 1.5×), TEMPO CLASHES GET A QUICK SWAP. FIXED-LENGTH
+              FADES — LIKE SPOTIFY'S — TREAT EVERY PAIR OF SONGS THE SAME.
+            </p>
+          </div>
+
+          <div className="setting">
+            <div className="setting__row mono">
+              <span>{settings.smartFade ? "BASE CROSSFADE LENGTH" : "CROSSFADE LENGTH"}</span>
               <span className="is-hot">{(settings.fadeDurationMs / 1000).toFixed(1)}s</span>
             </div>
             <input

@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { CrossfadeState, DeckState } from "../types";
 import { Waveform } from "./Waveform";
 import { ScrambleText } from "./ScrambleText";
+import { MagneticButton } from "./MagneticButton";
 
 function fmtTime(s: number): string {
   if (!Number.isFinite(s) || s <= 0) return "00:00";
@@ -33,11 +34,13 @@ export function Deck({
   isActive,
   crossfade,
   autoFadeCountdown,
+  onRequestSearch,
 }: {
   deck: DeckState;
   isActive: boolean;
   crossfade: CrossfadeState;
   autoFadeCountdown: number | null;
+  onRequestSearch?: () => void;
 }) {
   const fadingIn = crossfade.active && crossfade.to === deck.id;
   const fadingOut = crossfade.active && crossfade.from === deck.id;
@@ -190,7 +193,14 @@ export function Deck({
             exit="exit"
           >
             <div className="deck__empty-glyph">◌</div>
-            <p className="mono deck__empty-text">NO SIGNAL — DECK IDLE</p>
+            <p className="mono deck__empty-text">
+              {isActive ? "THIS DECK IS FREE" : "NEXT TRACK LANDS HERE AUTOMATICALLY"}
+            </p>
+            {onRequestSearch && isActive && (
+              <MagneticButton className="deck__empty-cta" onClick={onRequestSearch}>
+                <span className="mono">+ LOAD A TRACK</span>
+              </MagneticButton>
+            )}
             <div className="deck__empty-bars">
               {Array.from({ length: 24 }).map((_, i) => (
                 <span key={i} style={{ animationDelay: `${i * 0.07}s` }} />
