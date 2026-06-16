@@ -16,6 +16,7 @@ import {
   tierFor,
 } from "./bpm";
 import { searchTracks } from "./search";
+import { CURATED_LIBRARY } from "./search";
 import {
   recordHistory,
   settingsStore,
@@ -150,6 +151,7 @@ export class AutoDJEngine {
       candidates: [],
       bestCandidate: null,
       autoMixEnabled: true,
+      autoPickId: null,
       mixPoint: null,
       mixCountdown: null,
       autoFadeCountdown: null,
@@ -277,8 +279,15 @@ export class AutoDJEngine {
 
   enqueue(track: Track) {
     if (this.state.queue.some((t) => t.id === track.id)) return;
-    this.state.queue = [...this.state.queue, track];
-    this.log(`QUEUE + "${track.title.toUpperCase().slice(0, 40)}"`, "info");
+    // A user choice always replaces the AI's own provisional pick.
+    if (this.state.autoPickId && this.state.queue[0]?.id === this.state.autoPickId) {
+      this.state.queue = [track, ...this.state.queue.slice(1)];
+      this.state.autoPickId = null;
+      this.log(`QUEUE + "${track.title.toUpperCase().slice(0, 40)}" — REPLACES AI PICK`, "info");
+    } else {
+      this.state.queue = [...this.state.queue, track];
+      this.log(`QUEUE + "${track.title.toUpperCase().slice(0, 40)}"`, "info");
+    }
     this.syncIdleDeck();
     this.notify();
   }
@@ -317,7 +326,11 @@ export class AutoDJEngine {
       void this.playNow(track);
       return;
     }
-    this.state.queue = [track, ...this.state.queue.filter((t) => t.id !== track.id)];
+    this.state.queue = [
+      track,
+      ...this.state.queue.filter((t) => t.id !== track.id && t.id !== this.state.autoPickId),
+    ];
+    this.state.autoPickId = null;
     this.armOnIdleDeck(track, "manual");
     this.notify();
   }
@@ -326,15 +339,16 @@ export class AutoDJEngine {
   private armOnIdleDeck(track: Track, reason: "auto" | "manual" | "queue") {
     const to = this.idleDeck();
     const deck = this.state.decks[to];
+    const offset = this.entryOffsetFor(track);
     deck.track = track;
     deck.analysis = quickAnalyze(track);
     deck.analysisPending = false;
     deck.status = "ready";
-    deck.currentTime = 0;
+    deck.currentTime = offset;
     deck.duration = track.duration;
     deck.volume = 0;
     this.cuedOnIdle = track.id;
-    void this.players[to].cue(track.id).catch(() => {
+    void this.players[to].cue(track.id, offset).catch(() => {
       this.cuedOnIdle = null;
     });
     this.log(
@@ -347,6 +361,7 @@ export class AutoDJEngine {
 
   removeFromQueue(trackId: string) {
     this.state.queue = this.state.queue.filter((t) => t.id !== trackId);
+    if (this.state.autoPickId === trackId) this.state.autoPickId = null;
     this.syncIdleDeck();
     this.notify();
   }
@@ -420,6 +435,7 @@ export class AutoDJEngine {
     this.state.candidates = [];
     this.state.bestCandidate = null;
     this.state.suggestionPhase = "idle";
+    this.state.autoPickId = null;
     this.cuedOnIdle = null;
     this.log("TRANSPORT ▸ HARD STOP", "warn");
     this.notify();
@@ -518,9 +534,11 @@ export class AutoDJEngine {
   }
 
   /**
-   * The "perfect moment": the last phrase boundary (8 bars of 4/4 at the
-   * track's BPM) that still leaves room for the full crossfade plus a small
-   * outro guard. Falls back to a plain time offset when BPM is unknown.
+   * The "perfect moment", governed by the EXIT auto: the phrase boundary
+   * (8 bars of 4/4 at the track's BPM) nearest the chosen exit point —
+   * outro, three-quarters or half — always leaving room for the full
+   * crossfade. If the point is already behind the playhead (e.g. the user
+   * switched mode mid-song), it snaps to the next phrase ahead instead.
    */
   private computeMixPoint(deck: DeckState): number | null {
     if (deck.duration <= 0) return null;
@@ -529,14 +547,43 @@ export class AutoDJEngine {
     const lastUsable = deck.duration - fadeLead;
     if (lastUsable <= 0) return Math.round(Math.max(0, deck.duration - 5) * 10) / 10;
 
+    let target = lastUsable;
+    if (settings.exitMode === "half") target = Math.min(lastUsable, deck.duration * 0.5);
+    else if (settings.exitMode === "threequarters")
+      target = Math.min(lastUsable, deck.duration * 0.75);
+
     const bpm = deck.analysis?.bpm;
-    if (bpm && bpm > 0) {
-      const phraseSec = (60 / bpm) * 32; // 8 bars of 4/4
-      const aligned = Math.floor(lastUsable / phraseSec) * phraseSec;
-      // Only honour the phrase grid when it doesn't chop the track in half.
-      if (aligned >= deck.duration * 0.55) return Math.round(aligned * 10) / 10;
+    const phraseSec = bpm && bpm > 0 ? (60 / bpm) * 32 : null; // 8 bars of 4/4
+    let point = target;
+    if (phraseSec) {
+      const aligned = Math.floor(target / phraseSec) * phraseSec;
+      if (aligned >= 30) point = aligned;
     }
-    return Math.round(lastUsable * 10) / 10;
+
+    // Mode changed mid-song and the point is already gone: next phrase ahead.
+    if (point < deck.currentTime - 1) {
+      point = phraseSec
+        ? Math.min(lastUsable, (Math.floor(deck.currentTime / phraseSec) + 1) * phraseSec)
+        : lastUsable;
+    }
+    return Math.round(point * 10) / 10;
+  }
+
+  /**
+   * Where the incoming track should start, governed by the ENTRY auto:
+   * from the top, past the intro (one 8-bar phrase), or at its half —
+   * phrase-aligned and always leaving at least a minute of material.
+   */
+  private entryOffsetFor(track: Track): number {
+    const { entryMode } = settingsStore.get();
+    if (entryMode === "start") return 0;
+    const bpm = quickAnalyze(track).bpm;
+    const phraseSec = (60 / bpm) * 32;
+    const cap = track.duration > 0 ? Math.max(0, track.duration - 60) : Number.MAX_SAFE_INTEGER;
+    if (entryMode === "skipintro") return Math.round(Math.min(phraseSec, cap));
+    if (track.duration <= 0) return 0;
+    const aligned = Math.floor((track.duration * 0.5) / phraseSec) * phraseSec;
+    return Math.round(Math.min(aligned, cap));
   }
 
   /**
@@ -548,6 +595,7 @@ export class AutoDJEngine {
     const pick = this.state.bestCandidate;
     if (pick) {
       this.state.queue = [pick.track];
+      this.state.autoPickId = pick.track.id;
       this.state.candidates = this.state.candidates.filter(
         (c) => c.track.id !== pick.track.id,
       );
@@ -558,7 +606,24 @@ export class AutoDJEngine {
       );
       return true;
     }
-    return false;
+    // Last resort — the floor never goes silent: pull something fresh from
+    // the onboard library even when the scout came back empty-handed.
+    const excluded = new Set<string>([
+      ...this.recentlyPlayed,
+      ...(["A", "B"] as DeckId[]).map((d) => this.state.decks[d].track?.id ?? ""),
+    ]);
+    const pool = CURATED_LIBRARY.filter((t) => !excluded.has(t.id));
+    const fallback = (pool.length > 0 ? pool : CURATED_LIBRARY)[
+      Math.floor(Math.random() * (pool.length > 0 ? pool.length : CURATED_LIBRARY.length))
+    ];
+    if (!fallback) return false;
+    this.state.queue = [fallback];
+    this.state.autoPickId = fallback.id;
+    this.log(
+      `AUTO-DJ FALLBACK ▸ "${fallback.title.toUpperCase().slice(0, 36)}" FROM ONBOARD LIBRARY`,
+      "ai",
+    );
+    return true;
   }
 
   /* ------------------------------- crossfade ------------------------------ */
@@ -570,6 +635,7 @@ export class AutoDJEngine {
     const next = s.queue[0];
     if (!next) return;
     s.queue = s.queue.slice(1);
+    if (s.autoPickId === next.id) s.autoPickId = null;
 
     const settings = settingsStore.get();
     const blend = planBlend(
@@ -584,12 +650,14 @@ export class AutoDJEngine {
     // idle deck, it can start instantly — no reload, no buffering gap.
     const alreadyArmed = this.cuedOnIdle === next.id && s.decks[to].track?.id === next.id;
 
+    const entryOffset = this.entryOffsetFor(next);
+
     const toDeck = s.decks[to];
     toDeck.track = next;
     toDeck.status = "loading";
     toDeck.analysis = quickAnalyze(next);
     toDeck.analysisPending = true;
-    toDeck.currentTime = 0;
+    toDeck.currentTime = entryOffset;
     toDeck.duration = next.duration;
     toDeck.volume = 0;
 
@@ -618,7 +686,7 @@ export class AutoDJEngine {
       void this.analyzeDeck(to, next);
     } else {
       void this.players[to]
-        .load(next.id, 0)
+        .load(next.id, 0, entryOffset)
         .then(() => {
           this.rememberPlayed(next);
           void this.analyzeDeck(to, next);
@@ -809,6 +877,26 @@ export class AutoDJEngine {
           `AI SCOUT ▸ ${candidates.length} CANDIDATES — BEST Δ${best.bpmDelta.toFixed(1)} BPM (${best.tier.toUpperCase()})`,
           "ai",
         );
+        // Hands-free mode: with an empty queue the AI queues its own best
+        // pick right away — visible in the queue and armed on the free deck.
+        // Anything the user queues later replaces it.
+        if (
+          this.state.queue.length === 0 &&
+          this.state.transport !== "stopped" &&
+          !this.state.crossfade.active
+        ) {
+          this.state.queue = [best.track];
+          this.state.autoPickId = best.track.id;
+          this.state.candidates = this.state.candidates.filter(
+            (c) => c.track.id !== best.track.id,
+          );
+          this.state.bestCandidate = this.state.candidates[0] ?? null;
+          this.log(
+            `AI PICK ▸ "${best.track.title.toUpperCase().slice(0, 36)}" QUEUED AUTOMATICALLY`,
+            "ai",
+          );
+          this.syncIdleDeck();
+        }
       } else {
         this.log("AI SCOUT ▸ NO VIABLE CANDIDATES FOUND", "warn");
       }

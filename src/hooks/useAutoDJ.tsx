@@ -24,6 +24,7 @@ const BOOT_STATE: EngineState = {
   candidates: [],
   bestCandidate: null,
   autoMixEnabled: true,
+  autoPickId: null,
   mixPoint: null,
   mixCountdown: null,
   autoFadeCountdown: null,

@@ -120,7 +120,11 @@ function MixerView({
       </main>
 
       <footer className="lower">
-        <QueuePanel queue={state.queue} onRemove={(id) => engine?.removeFromQueue(id)} />
+        <QueuePanel
+          queue={state.queue}
+          autoPickId={state.autoPickId}
+          onRemove={(id) => engine?.removeFromQueue(id)}
+        />
         <Ticker log={state.log} />
       </footer>
     </>

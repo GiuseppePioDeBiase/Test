@@ -224,7 +224,8 @@ export function SearchOverlay({
                   >
                     <p>TYPE A QUERY AND HIT SCAN.</p>
                     <p className="dim">
-                      STREAMS RESOLVE VIA PUBLIC YOUTUBE GATEWAYS — NOTHING IS EVER DOWNLOADED.
+                      STREAMS RESOLVE VIA YOUTUBE — NOTHING IS EVER DOWNLOADED. TRACKS OVER
+                      5 MINUTES ARE FILTERED OUT: THEY ARE USUALLY MULTI-SONG MIXES.
                     </p>
                   </motion.div>
                 )}

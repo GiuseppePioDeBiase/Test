@@ -1006,6 +1006,14 @@ button:disabled {
   letter-spacing: 0.16em;
 }
 
+.queue__ai-tag {
+  font-size: 8px;
+  color: #7fd6ff;
+  border: 1px solid rgba(127, 214, 255, 0.45);
+  padding: 3px 8px;
+  letter-spacing: 0.16em;
+}
+
 .queue__remove {
   width: 26px;
   height: 26px;
@@ -1816,6 +1824,48 @@ button:disabled {
   font-weight: 400;
   color: rgba(255, 255, 255, 0.4);
   letter-spacing: 0.22em;
+}
+
+.automix__modes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.mode-row__label {
+  font-size: 8.5px;
+  color: rgba(255, 255, 255, 0.38);
+  letter-spacing: 0.18em;
+  width: 44px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 9px 6px;
+  border: 1px solid var(--line);
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
+}
+.mode-btn:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+}
+.mode-btn--on {
+  border-color: rgba(198, 255, 0, 0.55);
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 
 .automix__timeline {

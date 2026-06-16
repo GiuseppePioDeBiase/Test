@@ -2,8 +2,25 @@ import { AnimatePresence, motion } from "framer-motion";
 import type { DeckId, EngineState, Track } from "../types";
 import { quickAnalyze, bpmDistance, tierFor } from "../lib/bpm";
 import { planBlend } from "../lib/autodj";
-import { useSettings } from "../lib/settings";
+import {
+  updateSettings,
+  useSettings,
+  type EntryMode,
+  type ExitMode,
+} from "../lib/settings";
 import { MagneticButton } from "./MagneticButton";
+
+const EXIT_MODES: Array<{ id: ExitMode; label: string; hint: string }> = [
+  { id: "outro", label: "OUTRO", hint: "Mix out near the end of the song" },
+  { id: "threequarters", label: "3/4", hint: "Mix out at three quarters of the song" },
+  { id: "half", label: "HALF", hint: "Mix out at the half of the song" },
+];
+
+const ENTRY_MODES: Array<{ id: EntryMode; label: string; hint: string }> = [
+  { id: "start", label: "START", hint: "Next song starts from the top" },
+  { id: "skipintro", label: "SKIP INTRO", hint: "Next song starts past its intro (8 bars)" },
+  { id: "half", label: "HALF", hint: "Next song starts at its half" },
+];
 
 function fmtClock(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "--:--";
@@ -111,6 +128,39 @@ export function AutoMixPanel({
             </motion.div>
           )}
         </AnimatePresence>
+      </div>
+
+      <div className="automix__modes">
+        <div className="mode-row">
+          <span className="mode-row__label mono" title="Where the playing song mixes OUT">
+            EXIT
+          </span>
+          {EXIT_MODES.map((m) => (
+            <button
+              key={m.id}
+              className={`mode-btn mono ${settings.exitMode === m.id ? "mode-btn--on" : ""}`}
+              onClick={() => updateSettings({ exitMode: m.id })}
+              title={m.hint}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        <div className="mode-row">
+          <span className="mode-row__label mono" title="Where the next song starts">
+            ENTRY
+          </span>
+          {ENTRY_MODES.map((m) => (
+            <button
+              key={m.id}
+              className={`mode-btn mono ${settings.entryMode === m.id ? "mode-btn--on" : ""}`}
+              onClick={() => updateSettings({ entryMode: m.id })}
+              title={m.hint}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {playing && mixPoint !== null && live.duration > 0 && (

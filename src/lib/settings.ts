@@ -8,6 +8,11 @@ import type { Track } from "../types";
 
 export type FadeCurve = "smooth" | "power" | "linear";
 
+/** Where the playing track mixes OUT: at the outro, at ¾, or at the half. */
+export type ExitMode = "outro" | "threequarters" | "half";
+/** Where the incoming track starts: from 0, past the intro, or at the half. */
+export type EntryMode = "start" | "skipintro" | "half";
+
 export interface EngineSettings {
   /** YouTube Data API v3 key — unlocks full official catalogue search. */
   apiKey: string;
@@ -22,6 +27,10 @@ export interface EngineSettings {
    * matches get long seamless blends, tempo clashes get quick swaps.
    */
   smartFade: boolean;
+  /** Auto exit point of the outgoing track. */
+  exitMode: ExitMode;
+  /** Auto entry point of the incoming track. */
+  entryMode: EntryMode;
 }
 
 export const DEFAULT_SETTINGS: EngineSettings = {
@@ -30,6 +39,8 @@ export const DEFAULT_SETTINGS: EngineSettings = {
   fadeTriggerSec: 15,
   fadeCurve: "smooth",
   smartFade: true,
+  exitMode: "outro",
+  entryMode: "start",
 };
 
 class PersistedStore<T> {

@@ -33,6 +33,19 @@ const INVIDIOUS_INSTANCES = [
 
 const REQUEST_TIMEOUT_MS = 6_000;
 
+/**
+ * Hard catalogue policy: only proper single songs are mixable.
+ * Anything over 5 minutes is almost always a multi-song mix/compilation,
+ * and anything under a minute is a short/ident; livestreams and unknown
+ * durations (0) have no end to mix out of. All are excluded categorically.
+ */
+const MIN_TRACK_SECONDS = 60;
+const MAX_TRACK_SECONDS = 300;
+
+function isMixableDuration(seconds: number): boolean {
+  return seconds >= MIN_TRACK_SECONDS && seconds <= MAX_TRACK_SECONDS;
+}
+
 function fetchJSON(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
   const ctrl = new AbortController();
   const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
@@ -99,7 +112,7 @@ async function searchOfficial(query: string, key: string, limit: number): Promis
     // durations are nice-to-have; the player reports them anyway
   }
 
-  return items.map((it) => ({
+  const mapped = items.map((it) => ({
     id: it.id!.videoId!,
     title: decodeEntities(it.snippet?.title ?? "Untitled"),
     artist: decodeEntities(it.snippet?.channelTitle ?? "Unknown artist"),
@@ -107,6 +120,9 @@ async function searchOfficial(query: string, key: string, limit: number): Promis
     thumbnail: thumbFor(it.id!.videoId!),
     source: "official" as const,
   }));
+  // Apply the duration policy only when we actually know the durations —
+  // if the details call failed, returning results beats returning nothing.
+  return durations.size > 0 ? mapped.filter((t) => isMixableDuration(t.duration)) : mapped;
 }
 
 /** Cheap key validation for the SETTINGS tool. */
@@ -139,7 +155,7 @@ function mapPiped(items: PipedItem[]): Track[] {
     const m = /v=([\w-]{11})/.exec(it.url ?? "");
     if (!m) continue;
     const duration = typeof it.duration === "number" ? Math.max(0, it.duration) : 0;
-    if (duration > 0 && duration < 60) continue; // skip shorts/idents
+    if (!isMixableDuration(duration)) continue; // shorts, live, multi-song mixes
     out.push({
       id: m[1],
       title: (it.title ?? "Untitled").trim(),
@@ -177,7 +193,7 @@ async function searchInvidious(base: string, query: string): Promise<Track[]> {
     if (!it.videoId) continue;
     const duration =
       typeof it.lengthSeconds === "number" ? Math.max(0, it.lengthSeconds) : 0;
-    if (duration > 0 && duration < 60) continue;
+    if (!isMixableDuration(duration)) continue; // shorts, live, multi-song mixes
     out.push({
       id: it.videoId,
       title: (it.title ?? "Untitled").trim(),
@@ -193,7 +209,6 @@ async function searchInvidious(base: string, query: string): Promise<Track[]> {
 /* -------------------------- Curated fallback ----------------------------- */
 
 export const CURATED_LIBRARY: Track[] = [
-  { id: "5qap5aO4i9A", title: "lofi hip hop radio — beats to relax/study to", artist: "Lofi Girl", duration: 0, thumbnail: thumbFor("5qap5aO4i9A"), source: "library" },
   { id: "y6120QOlsfU", title: "Sandstorm", artist: "Darude", duration: 225, thumbnail: thumbFor("y6120QOlsfU"), source: "library" },
   { id: "k85mRPqvMbE", title: "Crab Rave", artist: "Noisestorm", duration: 168, thumbnail: thumbFor("k85mRPqvMbE"), source: "library" },
   { id: "bM7SZ5SBzyY", title: "Faded", artist: "Alan Walker", duration: 212, thumbnail: thumbFor("bM7SZ5SBzyY"), source: "library" },

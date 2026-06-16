@@ -86,6 +86,11 @@ export interface EngineState {
   /** Whether the engine fires transitions by itself at the mix point. */
   autoMixEnabled: boolean;
   /**
+   * Id of the track the AI queued by itself when the user queued nothing.
+   * User-queued tracks always replace/outrank it.
+   */
+  autoPickId: string | null;
+  /**
    * The computed "perfect moment" (seconds into the active track) where the
    * transition should start: phrase-aligned to the track's BPM and placed
    * ahead of the outro. Null until duration/analysis are known.

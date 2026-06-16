@@ -10,7 +10,7 @@ type YTPlayerState = -1 | 0 | 1 | 2 | 3 | 5;
 
 interface YTPlayer {
   loadVideoById(videoId: string, startSeconds?: number): void;
-  cueVideoById(videoId: string): void;
+  cueVideoById(videoId: string, startSeconds?: number): void;
   playVideo(): void;
   pauseVideo(): void;
   stopVideo(): void;
@@ -158,18 +158,18 @@ export class DeckPlayer {
     this.listeners.forEach((fn) => fn(e));
   }
 
-  async load(videoId: string, volumePct: number): Promise<void> {
+  async load(videoId: string, volumePct: number, startSeconds = 0): Promise<void> {
     await this.readyPromise;
     if (!this.player) throw new Error("player unavailable");
     this.setVolume(volumePct);
-    this.player.loadVideoById(videoId, 0);
+    this.player.loadVideoById(videoId, startSeconds);
   }
 
   /** Buffers a video without starting playback — used to pre-arm the idle deck. */
-  async cue(videoId: string): Promise<void> {
+  async cue(videoId: string, startSeconds = 0): Promise<void> {
     await this.readyPromise;
     if (!this.player) throw new Error("player unavailable");
-    this.player.cueVideoById(videoId);
+    this.player.cueVideoById(videoId, startSeconds);
   }
 
   play() {

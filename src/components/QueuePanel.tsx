@@ -3,9 +3,11 @@ import type { Track } from "../types";
 
 export function QueuePanel({
   queue,
+  autoPickId,
   onRemove,
 }: {
   queue: Track[];
+  autoPickId: string | null;
   onRemove: (id: string) => void;
 }) {
   return (
@@ -37,6 +39,14 @@ export function QueuePanel({
                   </span>
                   <span className="queue__artist mono">{t.artist}</span>
                 </div>
+                {t.id === autoPickId && (
+                  <span
+                    className="queue__ai-tag mono"
+                    title="Chosen automatically by the AI — queue anything to replace it"
+                  >
+                    AI PICK
+                  </span>
+                )}
                 {i === 0 && <span className="queue__next-tag mono">NEXT</span>}
                 <button
                   className="queue__remove mono"
